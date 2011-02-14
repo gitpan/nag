@@ -1,0 +1,239 @@
+#!perl
+# PODNAME: nag
+# ABSTRACT: send yourself a reminder
+
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+  if 0;    # (improbably) not running under some shell
+
+use Modern::Perl;
+use File::Temp qw(tempfile);
+use FileHandle;
+use Gtk2::Notify -init, $0;
+use Getopt::Long::Descriptive qw(describe_options prog_name);
+
+# some icon specs
+use constant PHRASE    => [qw(psst hey HEY !!!)];
+use constant STROKE    => [qw(0000ff 0000ff ff0000 ff0000)];
+use constant FILL      => [qw(ffffff ffffff ffffff ffff00)];
+use constant OPACITY   => [ 0, 1, 1, 1 ];
+use constant FONT_SIZE => [ 20, 25, 28, 32 ];
+use constant XY        => [ [ 8, 40 ], [ 9, 40 ], [ 7, 41 ], [ 3, 43 ] ];
+
+my $name = prog_name;
+my ( $opt, $usage ) = describe_options(
+    "$name %o <time> <text>+",
+    [],
+    ['Send yourself a reminder.'],
+    [],
+    [
+        'urgency' => hidden => {
+            one_of => [
+                [ 'nudge|n', 'low key reminder' ],
+                [ 'poke|p',  'reminder with no particular urgency (default)' ],
+                [ 'shake|s', 'urgent reminder' ],
+                [ 'slap',    'do this!!!' ],
+            ]
+        }
+    ],
+    [],
+    [ 'help', "print usage message and exit" ],
+);
+
+print( $usage->text ), exit if $opt->help;
+given ( scalar @ARGV ) {
+    when (0) {
+        $usage->die(
+            {
+                pre_text => "ERROR: No time or message.\n\n"
+            }
+          )
+    }
+    when (1) {
+        $usage->die(
+            {
+                pre_text => "ERROR: No message.\n\n"
+            }
+          )
+    }
+}
+
+# parse time
+require DateTime;
+require DateTime::TimeZone;
+
+my $tz = DateTime::TimeZone->new( name => 'local' );
+my $time = shift;
+my %props;
+my $re = qr{
+    \A (?&delta) | (?&fixed) \Z
+    (?(DEFINE)
+      (?<delta> (\d++[hms]) (?{@props{qw(time unit)} = $^N =~ /^(.+)(.)$/}))
+      (?<fixed> (?&time) (?&suffix)?)
+      (?<time> (\d{1,2}(?::\d{2})?) (?{@props{qw(hour minute)} = split /:/, $^N}))
+      (?<suffix> ([ap]) m (?{$props{suffix} = lc $^N}))
+    )
+}xi;
+$usage->die( { pre_text => "ERROR: could not understand time\n\n" } )
+  unless $time =~ $re;
+my $now = DateTime->now( time_zone => $tz );
+my $then = $now->clone;
+if ( $props{unit} ) {
+    my $unit = lc $props{unit};
+    given ($unit) {
+        when ('h') { $unit = 'hours' }
+        when ('m') { $unit = 'minutes' }
+        when ('s') { $unit = 'seconds' }
+    }
+    $then->add( $unit => $props{time} );
+}
+else {
+    my ( $hour, $minute ) = @props{qw(hour minute)};
+    $minute ||= 0;
+    $usage->die( { pre_text => "ERROR: impossible time\n\n" } )
+      unless $hour < 25 && $minute < 60;
+    my $suffix = $props{suffix} || '';
+    $usage->die( { pre_text => "ERROR: impossible time\n\n" } )
+      if $hour > 12 && $suffix eq 'a';
+    $then->set( hour => $hour, minute => $minute, second => 0 );
+    if ( $now->hour > 12 && $suffix eq 'a' ) {
+        $then->add( days => 1 );
+    }
+    elsif ($hour < 13 && $suffix eq 'p'
+        || $suffix eq '' && $now->hour > $then->hour )
+    {
+        $then->add( hours => 12 );
+    }
+}
+my $seconds = $then->epoch - $now->epoch;
+$seconds = 0 if $seconds < 0;    # same moment
+
+# set verbosity level
+my $verbosity;
+given ( $opt->urgency ) {
+    when ('nudge') { $verbosity = 0 }
+    when ('poke')  { $verbosity = 1 }
+    when ('shake') { $verbosity = 2 }
+    when ('slap')  { $verbosity = 3 }
+    default        { $verbosity = 1 }
+};
+
+# generate message text and synopsis
+my $text = join ' ', @ARGV;
+$text =~ s/^\s++|\s++$//g;
+$text =~ s/\s++/ /g;
+( my $synopsis = $text ) =~ s/^(\S++(?: \S++){0,3}).*/$1/;
+$synopsis .= ' ...' if length($text) - length($synopsis) > 4;
+
+# spawn a daemon to pop up the window later
+unless (fork) {
+    sleep $seconds;
+    my $icon = icon($verbosity);
+    Gtk2::Notify->new( $synopsis, $text, $icon )->show;
+    unlink $icon;
+}
+
+# make a somewhat eye-catching icon
+sub icon {
+    my $verbosity = shift;
+    my $phrase    = PHRASE->[$verbosity];
+    my $fill      = FILL->[$verbosity];
+    my $stroke    = STROKE->[$verbosity];
+    my $font_size = FONT_SIZE->[$verbosity];
+    my ( $x, $y ) = @{ XY->[$verbosity] };
+    my $text = <<END;
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
+<!-- 
+Created by $name with some help from Inkscape (http://www.inkscape.org/) 
+-->
+<svg xmlns:dc="http://purl.org/dc/elements/1.1/"
+xmlns:cc="http://creativecommons.org/ns#"
+xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+xmlns:svg="http://www.w3.org/2000/svg"
+xmlns="http://www.w3.org/2000/svg" width="64px" height="64px"
+version="1.1">
+  <metadata id="metadata2990">
+    <rdf:RDF>
+      <cc:Work rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+        <dc:title></dc:title>
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <g id="layer1">
+    <rect style="fill:#$fill;fill-rule:evenodd;stroke:#$stroke;stroke-width:3px;stroke-linecap:butt;stroke-linejoin:round;stroke-opacity:1"
+    id="rect2993" width="62" height="62" x="1" y="1" />
+    <text xml:space="preserve"
+    style="font-size:${font_size}px;font-style:normal;font-weight:bold;line-height:125%;letter-spacing:0px;word-spacing:0px;fill:#$stroke;fill-opacity:1;stroke:none;font-family:Monospace;opacity:1"
+x="12.525171" y="28.595528" id="text3763">
+<tspan id="tspan3765" x="$x" y="$y">$phrase</tspan>
+</text>
+  </g>
+</svg>
+END
+    my ( $fh, $filename ) =
+      tempfile( TEMPLATE => 'nagXXXXXX', SUFFIX => '.svg' );
+    print $fh $text;
+    $fh->close;
+    return $filename;
+}
+
+
+
+=pod
+
+=head1 NAME
+
+nag - send yourself a reminder
+
+=head1 VERSION
+
+version 0.002
+
+=head1 SYNOPSIS
+
+  $ nag 2h drink coffee
+  $ nag 20s inhale
+  $ nag 40s exhale
+  
+  $ nag 8am pull on pants
+  $ nag 9 stretch
+  
+  $ nag --nudge 9:00pm go home
+  $ nag --shake 9:30pm brush teeth
+  $ nag --slap 10:00pm go to bed
+  
+  $ nag --help
+  nag [-nps] [long options...] <time> <text>+
+	           
+	Send yourself a reminder.
+	           
+	-n --nudge   low key reminder
+	-p --poke    reminder with no particular urgency (default)
+	-s --shake   urgent reminder
+	--slap       do this!!!
+	           
+	--help       print usage message and exit
+
+=head1 DESCRIPTION
+
+B<nag> is a utility to facilitate invoking C<Gtk2::Notify> to send your future
+self reminders. It causes a notification window with a somewhat eye catching icon
+to appear on your screen, linger a moment, and then fade away.
+
+=head1 AUTHOR
+
+David F. Houghton <dfhoughton@gmail.com>
+
+=head1 COPYRIGHT AND LICENSE
+
+This software is copyright (c) 2011 by David F. Houghton.
+
+This is free software; you can redistribute it and/or modify it under
+the same terms as the Perl 5 programming language system itself.
+
+=cut
+
+
+__END__
+
